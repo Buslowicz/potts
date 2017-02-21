@@ -1,17 +1,32 @@
 {
   "name": "potts",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Polymer To TypeScript docs converter is a tool to convert Polymer Docs to TypeScript interfaces.",
   "main": "index.js",
   "bin": {
     "potts": "index.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/Draccoz/potts.git"
+  },
+  "keywords": [
+    "TypeScript",
+    "Polymer",
+    "Types",
+    "Hydrolysis",
+    "Polymer Analyzer"
+  ],
   "author": {
     "email": "draccoz+typescript@gmail.com",
     "name": "Daniel \"Dracco\" Busłowicz",
     "url": "https://github.com/Draccoz"
   },
   "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Draccoz/potts/issues"
+  },
+  "homepage": "https://github.com/Draccoz/potts#readme",
   "dependencies": {
     "command-line-args": "^3.0.5",
     "command-line-usage": "^4.0.0",
