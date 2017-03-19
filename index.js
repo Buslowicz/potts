@@ -1,8 +1,8 @@
+#!/usr/bin/env node
 "use strict";
 
 const fs = require("fs");
 const path = require("path");
-const _ = require("lodash");
 const commandLineArgs = require("command-line-args");
 const commandLineUsage = require("command-line-usage");
 const Analyzer = require("polymer-analyzer").Analyzer;
@@ -13,9 +13,18 @@ let analyzer = new Analyzer({
   urlLoader: new FSUrlLoader(process.cwd()),
   urlResolver: new PackageUrlResolver()
 });
+const supportedFeatures = [ "element", "element-mixin", "namespace", "function", "behavior" ];
 
-const indent = tab => line => line.length > 0 ? tab + line : line;
-const filterFeatures = item => item.constructor.name === "PolymerElement" || item.constructor.name === "Behavior";
+const reindent = (chunks, ...values) => {
+  let str = chunks.slice(0, 1)
+    .concat(values.map((v, i) => v + chunks[ i + 1 ]))
+    .join("")
+    .replace(/\t/g, "  ")   // replace tabs with spaces
+    .replace(/\n(\s*\n)+/g, "\n")   // collapse multiple empty lines
+    .replace(/^\n?([\S\s]*?)[\n\s]*$/, "$1"); // trim leading new line and ending whitespace
+  let tabStart = " ".repeat(Math.min.apply(null, str.match(/^(\s)*/mg).map(t => t.length)));
+  return str.replace(new RegExp(`^${tabStart}`, "mg"), "");
+};
 const jsDoc = (desc, indentLevel = 0) => {
   if (!desc || !desc.length) {
     return "";
@@ -24,39 +33,116 @@ const jsDoc = (desc, indentLevel = 0) => {
   if (!Array.isArray(desc)) {
     desc = desc.split("\n");
   }
-  let tab = "  ".repeat(indentLevel);
-  return [
-    "/**",
-    ...desc.map(line => ` * ${line}`),
-    " */",
-    ""
-  ].map(indent(tab)).join("\n");
+//  let tab = "  ".repeat(indentLevel);
+  return reindent(indentLevel)`
+    /**${desc.map(line => `
+     *${line ? ` ${line}` : ""}`).join("")}
+     */
+  `;
 };
-const cast = (type, params) => {
+const cast = (name, type, params) => {
   let primitives = [ "string", "number", "boolean" ];
+  let polymerVoidMethods = [
+    "created", "ready", "attached", "detached", "attributeChanged",
+    "connectedCallback", "disconnectedCallback", "attributeChangedCallback",
+    "updateStyles", "linkPaths", "unlinkPaths", "notifySplices", "set", "setProperties"
+  ];
   if (primitives.includes(type)) {
-    return type;
+    return { returnType: type };
   }
   if (type === "Function") {
-    return `(${(params || []).map(param => `${param.name}: any`).join(", ")}) => any`;
+    let returnType = polymerVoidMethods.includes(name) ? "void" : "any";
+    return {
+      returnType,
+      methodParams: (params || []).map(param => `${param.name}: any`)
+    };
   }
-  if (type === "Array") {
-    return "Array<any>";
+  return {
+    returnType: type === "Array" ? "Array<any>" : "any"
+  };
+};
+
+const filterFeatures = feature => Array.from(feature.kinds.keys()).some(key => supportedFeatures.includes(key));
+const getFeatureDetails = feature => {
+  let name;
+  let namespace = null;
+  let cNameParts = feature.className && feature.className.split(".");
+  if (cNameParts) {
+    [ namespace, name ] = [ cNameParts.slice(0, -1).join("."), cNameParts.slice(-1)[ 0 ] ];
   } else {
-    return "any";
+    name = feature.tagName;
   }
+  let camelName = name.replace(/(?:^|-)(.)/g, (_, m) => m.toUpperCase());
+  return {
+    namespace, name: camelName,
+    module: feature.sourceRange.file,
+    jsdoc: feature.description ? feature.description.trim() : null,
+    properties: feature.properties
+      .filter((property) => !property.private)
+      .map(({ name, type, readOnly, params, description }) => {
+        let { returnType, methodParams } = cast(name, type, params);
+        return {
+          jsDoc: description ? description.trim() : null,
+          readonly: readOnly ? "readonly " : "",
+          type: returnType,
+          params: methodParams,
+          name
+        };
+      })
+      .concat({ jsDoc: "", readonly: "", name: "new", params: [], type: camelName })
+  };
 };
-const NS = ns => (tpl) => {
-  if (!ns) {
-    return tpl;
+const toModulesMap = features => features.reduce((map, feature) => {
+  let repos = {
+    bower_components: "bower:",
+    node_modules: "npm:"
+  };
+  let modulePath = feature.module
+    .replace(new RegExp(`(${Object.keys(repos).join("|")})\\/`), (_, repo) => (repos)[ repo ])
+    .concat(feature.namespace ? `#${feature.namespace}` : "");
+  if (!map[ modulePath ]) {
+    map[ modulePath ] = [];
   }
-  return [
-    `declare namespace ${ns} {`,
-    tpl.split("\n").map(indent("  ")).join("\n"),
-    "}",
-    ""
-  ].join("\n");
+  map[ modulePath ].push(feature);
+  return map;
+}, {});
+const buildModules = modulesMap => {
+  return Object
+    .keys(modulesMap)
+    .map((modulePath) => [ modulePath, modulesMap[ modulePath ] ])
+    .map(([ modulePath, members ]) => reindent`
+      declare module "${modulePath}" {
+      ${members.map(({ jsdoc, name, properties }) => `
+        ${jsdoc ? `
+        /**${jsdoc.split("\n").map(line => `
+         *${line ? ` ${line}` : ""}`).join("")}
+         */`
+      : ""}
+        export interface ${name} {
+        ${properties.map(({ jsDoc, readonly, name, params, type }) => `
+          ${jsDoc ? `
+          /**${jsDoc.split("\n").map(line => `
+           *${line ? ` ${line}` : ""}`).join("")}
+           */`
+      : ""}
+          ${readonly}${name}${params ? `(${params.join(", ")})` : ""}: ${type};`).join("\n")}
+        }`).join("\n")}
+      }`);
 };
+const splitModulesToFiles = modulesMap => Object
+  .keys(modulesMap)
+  .map((mod) => modulesMap[ mod ])
+  .reduce((filesMap, mod) => {
+    let path = mod.match(/declare module "([^"#]*)["#]/)[ 1 ];
+    if (!filesMap[ path ]) {
+      filesMap[ path ] = {
+        fileName: path.match(/(?:[^:]*:)?(?:[^\/]+\/)*(.*)\.html/)[ 1 ],
+        modules: []
+      };
+    }
+    filesMap[ path ].modules.push(mod);
+    return filesMap;
+  }, {});
 
 const cliOptions = [
   {
@@ -70,14 +156,7 @@ const cliOptions = [
     alias: "d",
     type: String,
     description: "Output all declarations to this folder",
-    defaultValue: ""
-  },
-  {
-    name: "output",
-    alias: "o",
-    type: String,
-    description: "Output all declarations to single file",
-//    defaultValue: "index.d.ts"
+    defaultValue: "types"
   },
   {
     name: "input",
@@ -87,6 +166,7 @@ const cliOptions = [
   }
 ];
 
+/** @property outDir */
 let cli;
 
 try {
@@ -97,7 +177,7 @@ try {
 }
 if (cli.help) {
   const packageJSON = require("./package.json");
-  const execName = Object.keys(packageJSON.bin)[0];
+  const execName = Object.keys(packageJSON.bin)[ 0 ];
   console.log(commandLineUsage([
     {
       header: "Polymer To TypeScript docs converter",
@@ -122,43 +202,25 @@ if (cli.help) {
   process.exit(0);
 }
 
-analyzer.analyze(cli.input)
-  .then((document) => Array
-    .from(document.getFeatures())
-    .filter(filterFeatures)
-    .map(item => {
-      let cNameParts = item.className && item.className.split(".");
-      let [ namespace, name ] = item.tagName ?
-        [ null, item.tagName ] : [ cNameParts[ 0 ], cNameParts.slice(-1)[ 0 ] ];
-      let declaration = namespace ? "export" : "declare";
-      let camelName = name.replace(/(?:^|-)(.)/g, (_, m) => m.toUpperCase());
-      return {
-        namespace, name,
-        dts: NS(namespace)(`${jsDoc(item.description)}${declaration} interface ${camelName} {\n${
-          item.properties
-            .map(({ name, type, readOnly, params, description }) => {
-              return `${jsDoc(description, 1)}  ${readOnly ? "readonly " : ""}${name}: ${cast(type, params)};`;
-            })
-            .concat([ `  new (): ${camelName};` ])
-            .join("\n")
-          }\n}`)
-      };
+if (!fs.existsSync(cli.outDir)) {
+  fs.mkdirSync(cli.outDir);
+}
+
+analyzer
+  .analyze(cli.input)
+  .then((document) => Array.from(document.getFeatures()).filter(filterFeatures).map(getFeatureDetails))
+  .then(toModulesMap)
+  .then(buildModules)
+  .then(splitModulesToFiles)
+  .then(filesMap => Promise.all(Object.keys(filesMap)
+    .map(filePath => new Promise((done, fail) => {
+      let fileInfo = filesMap[ filePath ];
+      return fs.writeFile(
+        path.join(cli.outDir, `${fileInfo.fileName}.d.ts`),
+        `${fileInfo.modules.join("\n\n")}\n`,
+        (err) => err ? fail(err) : done());
     }))
-  .then(elements => {
-    if (cli.output) {
-      let dts = elements.map(el => el.dts).join("\n");
-      return new Promise((done, fail) => fs.writeFile(cli.output, dts, (err) => err ? fail(err) : done()));
-    } else {
-      if (cli.outDir && !fs.existsSync(cli.outDir)) {
-        fs.mkdirSync(cli.outDir);
-      }
-      return Promise.all(elements.map(el => {
-        return new Promise((done, fail) => {
-          return fs.writeFile(path.join(cli.outDir, `${el.name}.d.ts`), el.dts, (err) => err ? fail(err) : done());
-        });
-      }));
-    }
-  })
+  ))
   .then(() => {
     console.log("done");
     process.exit(0);
