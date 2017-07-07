@@ -81,12 +81,10 @@ function printElement(declaration) {
 
 function printBehavior(declaration) {
   return `${indent(2)(printJSdoc(declaration.jsDoc))}
-  export interface ${declaration.name} {${
+  export const ${declaration.name}: {${
     declaration.properties.join("\n")}${
     declaration.methods.join("\n")}
-    new (...args): ${declaration.name};
-  }
-  export const ${declaration.name}: ${declaration.name};`;
+  }`;
 }
 
 function printMixin(declaration) {
