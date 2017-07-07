@@ -203,9 +203,9 @@ if (cli.help) {
 }
 
 if (!cli.input) {
-  const bower = require("./bower.json");
+  const bower = JSON.parse(fs.readFileSync(path.join(process.cwd(), "bower.json"), "utf-8"));
   cli.input = Object
-    .keys(bower.dependencies)
+    .keys(bower.dependencies || {})
     .map((dep) => {
       const config = JSON.parse(fs.readFileSync(path.join("./bower_components", dep, "bower.json"), "utf-8"));
       if (!Array.isArray(config.main)) {
@@ -232,26 +232,29 @@ analyzer
       }
       return map;
     }, new Map()))
-  .then((data) => fs.writeFileSync(cli.outFile, Array
-    .from(data.entries())
-    .map(([ path, contents ]) => {
-      const moduleContents = contents.map((declaration) => {
-        if (declaration.kinds.has("element")) {
-          return printElement(declaration);
-        }
-        if (declaration.kinds.has("behavior")) {
-          return printBehavior(declaration);
-        }
-        if (declaration.kinds.has("element-mixin")) {
-          return printMixin(declaration);
-        }
-        return "";
-      }).join("");
-      return `\ndeclare module "${path}" {${moduleContents}\n}`;
-    })
-    .join("\n")
-    .trim()
-    .concat("\n")))
+  .then((data) => {
+    let types = Array
+      .from(data.entries())
+      .map(([ path, contents ]) => {
+        const moduleContents = contents.map((declaration) => {
+          if (declaration.kinds.has("element")) {
+            return printElement(declaration);
+          }
+          if (declaration.kinds.has("behavior")) {
+            return printBehavior(declaration);
+          }
+          if (declaration.kinds.has("element-mixin")) {
+            return printMixin(declaration);
+          }
+          return "";
+        }).join("");
+        return `\ndeclare module "${path}" {${moduleContents}\n}`;
+      })
+      .join("\n");
+    if (types.length) {
+      fs.writeFileSync(cli.outFile, types.trim().concat("\n"));
+    }
+  })
   .then(() => {
     console.log("done");
     process.exit(0);
