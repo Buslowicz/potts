@@ -9,140 +9,137 @@ const Analyzer = require("polymer-analyzer").Analyzer;
 const FSUrlLoader = require("polymer-analyzer/lib/url-loader/fs-url-loader").FSUrlLoader;
 const PackageUrlResolver = require("polymer-analyzer/lib/url-loader/package-url-resolver").PackageUrlResolver;
 
-let analyzer = new Analyzer({
+const analyzer = new Analyzer({
   urlLoader: new FSUrlLoader(process.cwd()),
   urlResolver: new PackageUrlResolver()
 });
-const supportedFeatures = [ "element", "element-mixin", "namespace", "function", "behavior" ];
+const supportedFeatures = [ "element", "element-mixin", "behavior" ];
 
-const reindent = (chunks, ...values) => {
-  let str = chunks.slice(0, 1)
-    .concat(values.map((v, i) => v + chunks[ i + 1 ]))
-    .join("")
-    .replace(/\t/g, "  ")   // replace tabs with spaces
-    .replace(/\n(\s*\n)+/g, "\n")   // collapse multiple empty lines
-    .replace(/^\n?([\S\s]*?)[\n\s]*$/, "$1"); // trim leading new line and ending whitespace
-  let tabStart = " ".repeat(Math.min.apply(null, str.match(/^(\s)*/mg).map(t => t.length)));
-  return str.replace(new RegExp(`^${tabStart}`, "mg"), "");
-};
-const jsDoc = (desc, indentLevel = 0) => {
-  if (!desc || !desc.length) {
-    return "";
+function parseType(type, forceArray) {
+  if (/^[!?]/.test(type)) {
+    type = type.slice(1);
   }
 
-  if (!Array.isArray(desc)) {
-    desc = desc.split("\n");
+  if (/=$/.test(type)) {
+    type = type.slice(0, -1);
   }
-//  let tab = "  ".repeat(indentLevel);
-  return reindent(indentLevel)`
-    /**${desc.map(line => `
-     *${line ? ` ${line}` : ""}`).join("")}
-     */
-  `;
-};
-const cast = (name, type, params) => {
-  let primitives = [ "string", "number", "boolean" ];
-  let polymerVoidMethods = [
-    "created", "ready", "attached", "detached", "attributeChanged",
-    "connectedCallback", "disconnectedCallback", "attributeChangedCallback",
-    "updateStyles", "linkPaths", "unlinkPaths", "notifySplices", "set", "setProperties"
-  ];
-  if (primitives.includes(type)) {
-    return { returnType: type };
+
+  if (type === "Array") {
+    type += "<any>";
+  } else if (![ "Date", "string", "boolean", "number", "Symbol" ].includes(type)) {
+    type = "any";
   }
-  if (type === "Function") {
-    let returnType = polymerVoidMethods.includes(name) ? "void" : "any";
-    return {
-      returnType,
-      methodParams: (params || []).map(param => `${param.name}: any`)
-    };
-  }
-  return {
-    returnType: type === "Array" ? "Array<any>" : "any"
+
+  return forceArray ? `Array<${type}>` : type;
+}
+
+function indent(tabs) {
+  const indentString = typeof tabs === "number" ? " ".repeat(tabs) : tabs;
+  return (chunks, ...vars) => {
+    return (typeof chunks === "string" ? [ chunks ] : chunks)
+      .reduce((src, chunk, i) => src + vars[ i - 1 ] + chunk)
+      .split("\n")
+      .map((line) => /^\s*$/.test(line) && typeof tabs === "number" ? "" : (indentString + line).replace(/\s*$/, ""))
+      .join("\n");
   };
-};
+}
+
+function printJSdoc({ description, tags }) {
+  const nonEmptyTags = tags && tags.filter((tag) => tag.title !== "type" || tag.type.name);
+  return description || nonEmptyTags && nonEmptyTags.length ? `
+/**${indent(" * ")(description.trim())}${description.trim() && nonEmptyTags.length ? `
+ *` : ""}${nonEmptyTags.map((tag) => `
+ * @${[
+    tag.title,
+    ...(tag.type && tag.type.name ? [ `{${tag.type.name}}` ] : []),
+    tag.name,
+    (tag.description || "").trim()
+  ].filter((t) => !!t).join(" ")}`).join("")}
+ */` : "";
+}
+
+function printMethod(method) {
+  const returnType = method.return ? `: ${parseType(method.return.type)}` : "";
+  const JSDoc = printJSdoc(method.jsdoc);
+  const params = method.params.map(({ name, type }) => `${name}: ${parseType(type, name.startsWith("..."))}`).join(", ");
+  return indent(4)`${JSDoc}\n${method.name}(${params})${returnType};`;
+}
+
+function printProperty(property) {
+  const JSDoc = printJSdoc(property.jsdoc);
+  let type = property.type;
+  return indent(4)`${JSDoc}\n${property.name}${type.startsWith("?") ? "?" : ""}: ${parseType(type)};`;
+}
+
+function printElement(declaration) {
+  return `${indent(2)(printJSdoc(declaration.jsDoc))}
+  export class ${declaration.name} {${
+    declaration.properties.join("\n")}${
+    declaration.methods.join("\n")}
+  }`;
+}
+
+function printBehavior(declaration) {
+  return `${indent(2)(printJSdoc(declaration.jsDoc))}
+  export interface ${declaration.name} {${
+    declaration.properties.join("\n")}${
+    declaration.methods.join("\n")}
+    new (...args): ${declaration.name};
+  }
+  export const ${declaration.name}: ${declaration.name};`;
+}
+
+function printMixin(declaration) {
+  return `${indent(2)(printJSdoc(declaration.jsDoc))}
+  export function ${declaration.name}<T extends object>(Base: { new (...args: any[]): T }): {
+    new (...args: any[]): T & {${indent(2)`${
+    declaration.properties.join("\n")}${
+    declaration.methods.join("\n")}`}
+    }
+  };`;
+}
 
 const filterFeatures = feature => Array.from(feature.kinds.keys()).some(key => supportedFeatures.includes(key));
+
 const getFeatureDetails = feature => {
-  let name;
-  let namespace = null;
-  let cNameParts = feature.className && feature.className.split(".");
-  if (cNameParts) {
-    [ namespace, name ] = [ cNameParts.slice(0, -1).join("."), cNameParts.slice(-1)[ 0 ] ];
-  } else {
-    name = feature.tagName;
-  }
-  let camelName = name.replace(/(?:^|-)(.)/g, (_, m) => m.toUpperCase());
-  return {
-    namespace, name: camelName,
-    module: feature.sourceRange.file,
-    jsdoc: feature.description ? feature.description.trim() : null,
-    properties: feature.properties
-      .filter((property) => !property.private)
-      .map(({ name, type, readOnly, params, description }) => {
-        let { returnType, methodParams } = cast(name, type, params);
-        return {
-          jsDoc: description ? description.trim() : null,
-          readonly: readOnly ? "readonly " : "",
-          type: returnType,
-          params: methodParams,
-          name
-        };
-      })
-      .concat({ jsDoc: "", readonly: "", name: "new", params: [], type: camelName })
-  };
-};
-const toModulesMap = features => features.reduce((map, feature) => {
-  let repos = {
+  const [ , namespace = null, identifier ] = (feature.identifiers.values().next().value || "").match(/(?:([\w]+)\.)?(.*)/);
+
+  const name = identifier.replace(/(?:^|-)(.)/g, (_, m) => m.toUpperCase());
+  const jsDoc = feature.jsdoc || {};
+
+  const repos = {
     bower_components: "bower:",
     node_modules: "npm:"
   };
-  let modulePath = feature.module
-    .replace(new RegExp(`(${Object.keys(repos).join("|")})\\/`), (_, repo) => (repos)[ repo ])
-    .concat(feature.namespace ? `#${feature.namespace}` : "");
-  if (!map[ modulePath ]) {
-    map[ modulePath ] = [];
-  }
-  map[ modulePath ].push(feature);
-  return map;
-}, {});
-const buildModules = modulesMap => {
-  return Object
-    .keys(modulesMap)
-    .map((modulePath) => [ modulePath, modulesMap[ modulePath ] ])
-    .map(([ modulePath, members ]) => reindent`
-      declare module "${modulePath}" {
-      ${members.map(({ jsdoc, name, properties }) => `
-        ${jsdoc ? `
-        /**${jsdoc.split("\n").map(line => `
-         *${line ? ` ${line}` : ""}`).join("")}
-         */`
-      : ""}
-        export interface ${name} {
-        ${properties.map(({ jsDoc, readonly, name, params, type }) => `
-          ${jsDoc ? `
-          /**${jsDoc.split("\n").map(line => `
-           *${line ? ` ${line}` : ""}`).join("")}
-           */`
-      : ""}
-          ${readonly}${name}${params ? `(${params.join(", ")})` : ""}: ${type};`).join("\n")}
-        }`).join("\n")}
-      }`);
-};
-const splitModulesToFiles = modulesMap => Object
-  .keys(modulesMap)
-  .map((mod) => modulesMap[ mod ])
-  .reduce((filesMap, mod) => {
-    let path = mod.match(/declare module "([^"#]*)["#]/)[ 1 ];
-    if (!filesMap[ path ]) {
-      filesMap[ path ] = {
-        fileName: path.match(/(?:[^:]*:)?(?:[^\/]+\/)*(.*)\.html/)[ 1 ],
-        modules: []
-      };
+
+  if (namespace) {
+    if (!jsDoc.tags) {
+      jsDoc.tags = [];
     }
-    filesMap[ path ].modules.push(mod);
-    return filesMap;
-  }, {});
+    jsDoc.tags.push({ title: "namespace", name: namespace });
+  }
+
+  return Object.assign(
+    {
+      namespace, name, jsDoc, kinds: feature.kinds,
+      fileName: feature.sourceRange.file,
+      module: feature.sourceRange.file.replace(new RegExp(`(${Object.keys(repos).join("|")})\\/`), (_, repo) => (repos)[ repo ])
+    },
+    feature.methods ? {
+      methods: Array
+        .from((feature.methods).values())
+        .filter((method) => method.privacy === "public")
+        .map(printMethod)
+    } : null,
+    feature.properties ? {
+      properties: Array
+        .from(feature.properties.values())
+        .filter((prop) => prop.privacy === "public")
+        .filter((prop) => prop.type !== "Conditional")
+        .map(printProperty)
+    } : null
+  );
+};
 
 const cliOptions = [
   {
@@ -152,21 +149,23 @@ const cliOptions = [
     description: "Shows this help"
   },
   {
-    name: "outDir",
-    alias: "d",
+    name: "outFile",
+    alias: "o",
     type: String,
-    description: "Output all declarations to this folder",
-    defaultValue: "types"
+    description: "Output all declarations to a single file",
+    defaultValue: "potts.d.ts"
   },
   {
     name: "input",
     type: String,
-    multiple: false,
+    multiple: true,
     defaultOption: true
   }
 ];
 
-/** @property outDir */
+/**
+ * @property outFile
+ */
 let cli;
 
 try {
@@ -190,9 +189,10 @@ if (cli.help) {
     {
       header: "Examples",
       content: [
+        `${execName}`,
         `${execName} my-element.html`,
-        `${execName} --outDir types my-element.html`,
-        `${execName} --output types.d.ts my-element.html`
+        `${execName} --outFile types.d.ts`,
+        `${execName} --outFile types.d.ts my-element.html`
       ].join("\n")
     },
     {
@@ -202,25 +202,56 @@ if (cli.help) {
   process.exit(0);
 }
 
-if (!fs.existsSync(cli.outDir)) {
-  fs.mkdirSync(cli.outDir);
+if (!cli.input) {
+  const bower = require("./bower.json");
+  cli.input = Object
+    .keys(bower.dependencies)
+    .map((dep) => {
+      const config = JSON.parse(fs.readFileSync(path.join("./bower_components", dep, "bower.json"), "utf-8"));
+      if (!Array.isArray(config.main)) {
+        config.main = [ config.main ];
+      }
+      return config.main.map((file) => path.join("bower_components", dep, file));
+    })
+    .reduce((all, curr) => all.concat(curr), []);
 }
 
 analyzer
-  .analyze(cli.input)
-  .then((document) => Array.from(document.getFeatures()).filter(filterFeatures).map(getFeatureDetails))
-  .then(toModulesMap)
-  .then(buildModules)
-  .then(splitModulesToFiles)
-  .then(filesMap => Promise.all(Object.keys(filesMap)
-    .map(filePath => new Promise((done, fail) => {
-      let fileInfo = filesMap[ filePath ];
-      return fs.writeFile(
-        path.join(cli.outDir, `${fileInfo.fileName}.d.ts`),
-        `${fileInfo.modules.join("\n\n")}\n`,
-        (err) => err ? fail(err) : done());
-    }))
-  ))
+  .analyze([].concat(cli.input))
+  .catch(console.error)
+  .then((document) => Array
+    .from(document.getFeatures())
+    .filter(filterFeatures)
+    .map(getFeatureDetails))
+  .then((data) => data
+    .reduce((map, mod) => {
+      if (map.has(mod.module)) {
+        map.get(mod.module).push(mod);
+      } else {
+        map.set(mod.module, [ mod ]);
+      }
+      return map;
+    }, new Map()))
+  .then((data) => fs.writeFileSync(cli.outFile, Array
+    .from(data.entries())
+    .map(([ path, contents ]) => {
+      const moduleContents = contents.map((declaration) => {
+        if (declaration.kinds.has("element")) {
+          return printElement(declaration);
+        }
+        if (declaration.kinds.has("behavior")) {
+          return printBehavior(declaration);
+        }
+        if (declaration.kinds.has("element-mixin")) {
+          return printMixin(declaration);
+        }
+        return "";
+      }).join("");
+      return `\ndeclare module "${path}" {${moduleContents}\n}`;
+    })
+    .join("\n")
+    .trim()
+    .concat("\n")))
   .then(() => {
     console.log("done");
     process.exit(0);

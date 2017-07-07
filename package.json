@@ -1,6 +1,6 @@
 {
   "name": "potts",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Polymer To TypeScript docs converter is a tool to convert Polymer Docs to TypeScript interfaces.",
   "main": "index.js",
   "bin": {
@@ -30,7 +30,6 @@
   "dependencies": {
     "command-line-args": "^3.0.5",
     "command-line-usage": "^4.0.0",
-    "lodash": "^4.17.4",
-    "polymer-analyzer": "^2.0.0-alpha.19"
+    "polymer-analyzer": "^2.2.0"
   }
 }
