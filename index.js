@@ -73,7 +73,7 @@ function printProperty(property) {
 
 function printElement(declaration) {
   return `${indent(2)(printJSdoc(declaration.jsDoc))}
-  export class ${declaration.name} {${
+  export class ${declaration.name} extends Element {${
     declaration.properties.join("\n")}${
     declaration.methods.join("\n")}
   }`;
